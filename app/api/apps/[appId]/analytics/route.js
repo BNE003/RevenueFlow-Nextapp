@@ -4,6 +4,8 @@ import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
 
 const ALLOWED_RANGES = [7, 14, 30, 90, 180];
 const DAY_MS = 24 * 60 * 60 * 1000;
+const ACTIVE_SESSION_WINDOW_SECONDS = 30;
+const ACTIVE_SESSION_WINDOW_MS = ACTIVE_SESSION_WINDOW_SECONDS * 1000;
 
 const getRangeInDays = (value) => {
   const parsed = Number.parseInt(value, 10);
@@ -34,8 +36,15 @@ const buildBuckets = (startDate, endDate) => {
   return buckets;
 };
 
-const aggregatePeriod = (purchases = [], devices = [], bucketDates = null) => {
+const aggregatePeriod = (
+  purchases = [],
+  devices = [],
+  bucketDates = null
+) => {
   const revenueByDay = bucketDates
+    ? Object.fromEntries(bucketDates.map((d) => [d, 0]))
+    : null;
+  const trialRevenueByDay = bucketDates
     ? Object.fromEntries(bucketDates.map((d) => [d, 0]))
     : null;
   const usersByDay = bucketDates
@@ -43,16 +52,31 @@ const aggregatePeriod = (purchases = [], devices = [], bucketDates = null) => {
     : null;
 
   let totalRevenue = 0;
+  let totalTrialRevenue = 0;
+  let paidPurchasesCount = 0;
+  let trialPurchasesCount = 0;
   const uniqueDevices = new Set();
 
   purchases.forEach((purchase) => {
     const price = Number.parseFloat(purchase.price ?? 0);
     if (!Number.isFinite(price)) return;
-    totalRevenue += price;
+
+    const isTrial = Boolean(purchase.is_trial);
+    if (!isTrial) {
+      totalRevenue += price;
+      paidPurchasesCount += 1;
+    } else {
+      totalTrialRevenue += price;
+      trialPurchasesCount += 1;
+    }
 
     const key = bucketDates ? formatDateKey(purchase.created_at) : null;
     if (key && revenueByDay && key in revenueByDay) {
-      revenueByDay[key] += price;
+      if (isTrial && trialRevenueByDay) {
+        trialRevenueByDay[key] += price;
+      } else {
+        revenueByDay[key] += price;
+      }
     }
   });
 
@@ -66,9 +90,13 @@ const aggregatePeriod = (purchases = [], devices = [], bucketDates = null) => {
 
   return {
     totalRevenue: Number.parseFloat(totalRevenue.toFixed(2)),
-    purchasesCount: purchases.length,
+    totalTrialRevenue: Number.parseFloat(totalTrialRevenue.toFixed(2)),
+    paidPurchasesCount,
+    trialPurchasesCount,
+    totalPurchasesCount: purchases.length,
     newUsersCount: uniqueDevices.size,
     revenueByDay,
+    trialRevenueByDay,
     usersByDay,
   };
 };
@@ -78,6 +106,40 @@ const computeDelta = (current, previous) => {
   return Number.parseFloat(
     (((current - previous) / previous) * 100).toFixed(2)
   );
+};
+
+const averageSubscriptionDurationDays = (purchases = []) => {
+  const durations = purchases
+    .filter((purchase) => {
+      if (purchase.is_trial) return false;
+      if (!purchase.purchase_date || !purchase.expiration_date) return false;
+      const start = new Date(purchase.purchase_date);
+      const end = new Date(purchase.expiration_date);
+      return Number.isFinite(start.getTime()) && Number.isFinite(end.getTime()) && end > start;
+    })
+    .map((purchase) => {
+      const start = new Date(purchase.purchase_date).getTime();
+      const end = new Date(purchase.expiration_date).getTime();
+      return (end - start) / DAY_MS;
+    });
+
+  if (!durations.length) {
+    return { averageDays: null, sampleSize: 0 };
+  }
+
+  const total = durations.reduce((sum, value) => sum + value, 0);
+  const averageDays = Number.parseFloat((total / durations.length).toFixed(2));
+  return { averageDays, sampleSize: durations.length };
+};
+
+const uniqueDeviceIds = (purchases = [], predicate = () => true) => {
+  const ids = new Set();
+  purchases.forEach((purchase) => {
+    if (!predicate(purchase)) return;
+    if (!purchase.device_id) return;
+    ids.add(purchase.device_id);
+  });
+  return ids;
 };
 
 export async function GET(req, { params }) {
@@ -145,15 +207,18 @@ export async function GET(req, { params }) {
       );
     }
 
+    const activeSessionsSinceIso = new Date(now.getTime() - ACTIVE_SESSION_WINDOW_MS).toISOString();
+
     const [
       purchasesResult,
       devicesResult,
       previousPurchasesResult,
       previousDevicesResult,
+      activeSessionsResult,
     ] = await Promise.all([
       supabase
         .from("purchases")
-        .select("price, created_at")
+        .select("price, created_at, is_trial, device_id, purchase_date, expiration_date")
         .eq("app_id", appId)
         .gte("created_at", startIso)
         .lte("created_at", endIso),
@@ -165,7 +230,7 @@ export async function GET(req, { params }) {
         .lte("created_at", endIso),
       supabase
         .from("purchases")
-        .select("price, created_at")
+        .select("price, created_at, is_trial, device_id, purchase_date, expiration_date")
         .eq("app_id", appId)
         .gte("created_at", previousStartIso)
         .lte("created_at", previousEndIso),
@@ -175,19 +240,32 @@ export async function GET(req, { params }) {
         .eq("app_id", appId)
         .gte("created_at", previousStartIso)
         .lte("created_at", previousEndIso),
+      supabase
+        .from("active_sessions")
+        .select("id", { count: "exact", head: true })
+        .eq("app_id", appId)
+        .gte("last_heartbeat", activeSessionsSinceIso),
     ]);
 
     const purchasesError = purchasesResult.error;
     const devicesError = devicesResult.error;
     const previousPurchasesError = previousPurchasesResult.error;
     const previousDevicesError = previousDevicesResult.error;
+    const activeSessionsError = activeSessionsResult.error;
 
-    if (purchasesError || devicesError || previousPurchasesError || previousDevicesError) {
+    if (
+      purchasesError ||
+      devicesError ||
+      previousPurchasesError ||
+      previousDevicesError ||
+      activeSessionsError
+    ) {
       console.error("Error fetching analytics data:", {
         purchasesError,
         devicesError,
         previousPurchasesError,
         previousDevicesError,
+        activeSessionsError,
       });
       return NextResponse.json(
         { error: "Failed to fetch analytics data." },
@@ -199,25 +277,123 @@ export async function GET(req, { params }) {
     const devices = devicesResult.data ?? [];
     const previousPurchases = previousPurchasesResult.data ?? [];
     const previousDevices = previousDevicesResult.data ?? [];
+    const activeSessionsCount = activeSessionsResult.count ?? 0;
+
+    const trialDeviceIdsCurrent = Array.from(
+      uniqueDeviceIds(
+        purchases,
+        (purchase) => Boolean(purchase.is_trial) === true
+      )
+    );
+    const trialDeviceIdsPrevious = Array.from(
+      uniqueDeviceIds(
+        previousPurchases,
+        (purchase) => Boolean(purchase.is_trial) === true
+      )
+    );
+
+    const [convertedCurrentResult, convertedPreviousResult] = await Promise.all([
+      trialDeviceIdsCurrent.length
+        ? supabase
+            .from("purchases")
+            .select("device_id")
+            .eq("app_id", appId)
+            .eq("is_trial", false)
+            .in("device_id", trialDeviceIdsCurrent)
+        : { data: [], error: null },
+      trialDeviceIdsPrevious.length
+        ? supabase
+            .from("purchases")
+            .select("device_id")
+            .eq("app_id", appId)
+            .eq("is_trial", false)
+            .in("device_id", trialDeviceIdsPrevious)
+        : { data: [], error: null },
+    ]);
+
+    const convertedCurrentError = convertedCurrentResult.error;
+    const convertedPreviousError = convertedPreviousResult.error;
+
+    if (convertedCurrentError || convertedPreviousError) {
+      console.error("Error resolving trial conversion data:", {
+        convertedCurrentError,
+        convertedPreviousError,
+      });
+      return NextResponse.json(
+        { error: "Failed to compute trial cancellation metrics." },
+        { status: 500 }
+      );
+    }
+
+    const convertedCurrentDevices = new Set(
+      (convertedCurrentResult.data ?? [])
+        .map((row) => row.device_id)
+        .filter(Boolean)
+    );
+    const convertedPreviousDevices = new Set(
+      (convertedPreviousResult.data ?? [])
+        .map((row) => row.device_id)
+        .filter(Boolean)
+    );
 
     const dateBuckets = buildBuckets(startDate, endDate);
     const {
       totalRevenue,
-      purchasesCount,
+      totalTrialRevenue,
+      paidPurchasesCount,
+      trialPurchasesCount,
       newUsersCount,
       revenueByDay,
+      trialRevenueByDay,
       usersByDay,
     } = aggregatePeriod(purchases, devices, dateBuckets);
 
     const {
       totalRevenue: previousRevenue,
-      purchasesCount: previousPurchasesCount,
+      totalTrialRevenue: previousTrialRevenue,
+      paidPurchasesCount: previousPaidPurchasesCount,
+      trialPurchasesCount: previousTrialPurchasesCount,
       newUsersCount: previousNewUsers,
     } = aggregatePeriod(previousPurchases, previousDevices);
+
+    const { averageDays: averageSubscriptionDays, sampleSize: subscriptionSampleSize } =
+      averageSubscriptionDurationDays(purchases);
+    const {
+      averageDays: previousAverageSubscriptionDays,
+      sampleSize: previousSubscriptionSampleSize,
+    } = averageSubscriptionDurationDays(previousPurchases);
+
+    const totalCurrentTrials = trialDeviceIdsCurrent.length;
+    const totalPreviousTrials = trialDeviceIdsPrevious.length;
+    const convertedCurrentCount = convertedCurrentDevices.size;
+    const convertedPreviousCount = convertedPreviousDevices.size;
+    const cancelledCurrentTrials = totalCurrentTrials - convertedCurrentCount;
+    const cancelledPreviousTrials = totalPreviousTrials - convertedPreviousCount;
+    const trialCancellationRate =
+      totalCurrentTrials > 0
+        ? Number.parseFloat(
+            ((cancelledCurrentTrials / totalCurrentTrials) * 100).toFixed(2)
+          )
+        : 0;
+    const previousTrialCancellationRate =
+      totalPreviousTrials > 0
+        ? Number.parseFloat(
+            ((cancelledPreviousTrials / totalPreviousTrials) * 100).toFixed(2)
+          )
+        : 0;
+    const averageSubscriptionDelta =
+      Number.isFinite(averageSubscriptionDays) &&
+      Number.isFinite(previousAverageSubscriptionDays) &&
+      previousAverageSubscriptionDays !== 0
+        ? computeDelta(averageSubscriptionDays, previousAverageSubscriptionDays)
+        : null;
 
     const chart = dateBuckets.map((bucket) => ({
       date: bucket,
       revenue: Number.parseFloat(revenueByDay[bucket]?.toFixed(2) ?? 0),
+      trialRevenue: Number.parseFloat(
+        trialRevenueByDay?.[bucket]?.toFixed(2) ?? 0
+      ),
       newUsers: usersByDay[bucket] ?? 0,
     }));
 
@@ -229,12 +405,14 @@ export async function GET(req, { params }) {
         : 0;
     const conversionRate =
       newUsersCount > 0
-        ? Number.parseFloat(((purchasesCount / newUsersCount) * 100).toFixed(2))
+        ? Number.parseFloat(
+            ((paidPurchasesCount / newUsersCount) * 100).toFixed(2)
+          )
         : 0;
     const previousConversionRate =
       previousNewUsers > 0
         ? Number.parseFloat(
-            ((previousPurchasesCount / previousNewUsers) * 100).toFixed(2)
+            ((previousPaidPurchasesCount / previousNewUsers) * 100).toFixed(2)
           )
         : 0;
 
@@ -250,11 +428,38 @@ export async function GET(req, { params }) {
         end: endDate.toISOString(),
       },
       metrics: {
+        activeSessions: {
+          total: activeSessionsCount,
+          windowSeconds: ACTIVE_SESSION_WINDOW_SECONDS,
+          asOf: now.toISOString(),
+          delta: null,
+        },
+        averageSubscription: {
+          days: averageSubscriptionDays,
+          previousDays: previousAverageSubscriptionDays,
+          sampleSize: subscriptionSampleSize,
+          previousSampleSize: previousSubscriptionSampleSize,
+          delta: averageSubscriptionDelta,
+        },
+        trialCancellation: {
+          rate: trialCancellationRate,
+          previousRate: previousTrialCancellationRate,
+          totalTrials: totalCurrentTrials,
+          cancelledTrials: cancelledCurrentTrials,
+          previousTotalTrials: totalPreviousTrials,
+          previousCancelledTrials: cancelledPreviousTrials,
+          delta: computeDelta(trialCancellationRate, previousTrialCancellationRate),
+        },
         revenue: {
           total: totalRevenue,
+          trial: Number.parseFloat(totalTrialRevenue.toFixed(2)),
           currency: "USD",
-          count: purchasesCount,
+          count: paidPurchasesCount,
+          trialCount: trialPurchasesCount,
           previous: previousRevenue,
+          previousTrial: Number.parseFloat(previousTrialRevenue.toFixed(2)),
+          previousCount: previousPaidPurchasesCount,
+          previousTrialCount: previousTrialPurchasesCount,
           delta: computeDelta(totalRevenue, previousRevenue),
         },
         newUsers: {

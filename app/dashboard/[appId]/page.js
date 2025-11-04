@@ -6,6 +6,7 @@ import {
   CartesianGrid,
   ComposedChart,
   Line,
+  Rectangle,
   ResponsiveContainer,
   XAxis,
   YAxis,
@@ -47,6 +48,41 @@ const formatDateLabel = (isoDate) =>
     month: "short",
   }).format(new Date(isoDate));
 
+const formatDurationFromDays = (days) => {
+  if (days === null || days === undefined) return "—";
+  if (days >= 1) {
+    const rounded = Number.parseFloat(days.toFixed(1));
+    return `${rounded} day${rounded === 1 ? "" : "s"}`;
+  }
+  const hours = days * 24;
+  if (hours >= 1) {
+    const rounded = Number.parseFloat(hours.toFixed(1));
+    return `${rounded} hr${Math.abs(rounded - 1) < 0.01 ? "" : "s"}`;
+  }
+  const minutes = hours * 60;
+  if (minutes >= 1) {
+    const rounded = Math.round(minutes);
+    return `${rounded} min`;
+  }
+  const seconds = minutes * 60;
+  const roundedSeconds = Math.max(1, Math.round(seconds));
+  return `${roundedSeconds} sec`;
+};
+
+const PaidBarShape = (props) => {
+  const { payload } = props;
+  const hasTrial = (payload?.trialRevenue ?? 0) > 0;
+  const radius = hasTrial ? [12, 12, 0, 0] : [12, 12, 12, 12];
+  return <Rectangle {...props} radius={radius} />;
+};
+
+const TrialBarShape = (props) => {
+  const { payload } = props;
+  const hasPaid = (payload?.paidRevenue ?? 0) > 0;
+  const radius = hasPaid ? [0, 0, 12, 12] : [12, 12, 12, 12];
+  return <Rectangle {...props} radius={radius} />;
+};
+
 const trendIcon = (delta) => {
   if (delta === null || delta === undefined) return "neutral";
   if (delta > 0) return "up";
@@ -80,7 +116,15 @@ const RangeSelector = ({ value, options, onChange }) => {
   );
 };
 
-const MetricCard = ({ label, hint, value, secondary, delta, accent }) => {
+const MetricCard = ({
+  label,
+  hint,
+  value,
+  secondary,
+  delta,
+  accent,
+  live = false,
+}) => {
   const iconState = trendIcon(delta);
   const deltaColor =
     iconState === "up"
@@ -88,6 +132,7 @@ const MetricCard = ({ label, hint, value, secondary, delta, accent }) => {
       : iconState === "down"
       ? "text-error"
       : "text-base-content/50";
+  const accentColor = accent || "#38bdf8";
 
   return (
     <div className="rounded-2xl border border-base-300 bg-base-200/40 px-5 py-4 shadow-sm">
@@ -95,10 +140,23 @@ const MetricCard = ({ label, hint, value, secondary, delta, accent }) => {
         <div className="text-xs uppercase tracking-wide text-base-content/50">
           {label}
         </div>
-        <span
-          className="h-2 w-2 rounded-full"
-          style={{ backgroundColor: accent }}
-        />
+        {live ? (
+          <span className="relative inline-flex h-3 w-3 items-center justify-center">
+            <span
+              className="absolute inline-flex h-full w-full rounded-full opacity-60 animate-ping"
+              style={{ backgroundColor: accentColor }}
+            />
+            <span
+              className="relative inline-flex h-2 w-2 rounded-full"
+              style={{ backgroundColor: accentColor }}
+            />
+          </span>
+        ) : (
+          <span
+            className="h-2 w-2 rounded-full"
+            style={{ backgroundColor: accentColor }}
+          />
+        )}
       </div>
       <div className="mt-3 flex items-baseline gap-2">
         <span className="text-3xl font-semibold leading-none">{value}</span>
@@ -136,10 +194,17 @@ const MetricCard = ({ label, hint, value, secondary, delta, accent }) => {
 const CombinedChart = ({ data }) => {
   const chartData = useMemo(() => {
     if (!data?.length) return [];
-    return data.map((item) => ({
-      ...item,
-      label: formatDateLabel(item.date),
-    }));
+    return data.map((item) => {
+      const trial = item.trialRevenue ?? 0;
+      const paid = item.revenue ?? 0;
+      return {
+        ...item,
+        label: formatDateLabel(item.date),
+        paidRevenue: paid,
+        trialRevenue: trial,
+        revenueTotal: paid + trial,
+      };
+    });
   }, [data]);
 
   const CustomTooltip = ({ label, payload, active }) => {
@@ -148,10 +213,15 @@ const CombinedChart = ({ data }) => {
     const entries = payload.map((entry) => ({
       ...entry,
       value:
-        entry.dataKey === "revenue"
+        entry.dataKey === "paidRevenue" || entry.dataKey === "trialRevenue"
           ? preciseCurrencyFormatter.format(entry.value || 0)
           : numberFormatter.format(entry.value || 0),
-      name: entry.dataKey === "revenue" ? "Revenue" : "Visitors",
+      name:
+        entry.dataKey === "paidRevenue"
+          ? "Revenue"
+          : entry.dataKey === "trialRevenue"
+          ? "Trial revenue"
+          : "Visitors",
     }));
 
     return (
@@ -176,6 +246,7 @@ const CombinedChart = ({ data }) => {
       className="mt-8 h-[360px] w-full border-base-300/60 bg-base-200/10 p-0"
       config={{
         revenue: "#fb7185",
+        trial: "#fbcfe8",
         users: "#38bdf8",
       }}
     >
@@ -216,12 +287,22 @@ const CombinedChart = ({ data }) => {
             content={<CustomTooltip />}
           />
           <Bar
-            dataKey="revenue"
+            dataKey="trialRevenue"
+            stackId="revenue"
+            yAxisId="right"
+            fill="var(--chart-trial)"
+            maxBarSize={48}
+            name="Trial revenue"
+            shape={<TrialBarShape />}
+          />
+          <Bar
+            dataKey="paidRevenue"
+            stackId="revenue"
             yAxisId="right"
             fill="var(--chart-revenue)"
-            radius={[12, 12, 12, 12]}
             maxBarSize={48}
             name="Revenue"
+            shape={<PaidBarShape />}
           />
           <Line
             type="monotone"
@@ -289,25 +370,61 @@ export default function AppAnalyticsPage() {
   };
 
   const metrics = useMemo(() => {
-    if (!analytics) return [];
+    if (!analytics) return { primary: [], secondary: [] };
 
     const { metrics: raw } = analytics;
-    return [
+    const paidOrdersLabel = raw.revenue.count
+      ? `${raw.revenue.count} paid`
+      : null;
+    const trialOrdersLabel = raw.revenue.trialCount
+      ? `${raw.revenue.trialCount} trial`
+      : null;
+    const revenueOrdersText =
+      [paidOrdersLabel, trialOrdersLabel].filter(Boolean).join(" • ") ||
+      undefined;
+    const revenueHint =
+      raw.revenue.trial > 0
+        ? `Paid revenue (trial ${preciseCurrencyFormatter.format(
+            raw.revenue.trial
+          )})`
+        : "Paid revenue (no trials this range)";
+    const activeSessions = raw.activeSessions ?? {};
+    const activeSessionsHint = activeSessions.windowSeconds
+      ? `Heartbeat within last ${activeSessions.windowSeconds} sec`
+      : "Sessions reporting recently";
+    const averageSubscription = raw.averageSubscription ?? {};
+    const averageSubscriptionValue = formatDurationFromDays(
+      averageSubscription.days
+    );
+    const averageSubscriptionHint =
+      averageSubscription.sampleSize > 0
+        ? "Average between purchase and expiration"
+        : "No subscription durations recorded this range";
+    const trialCancellation = raw.trialCancellation ?? {};
+    const trialCancellationHint =
+      trialCancellation.totalTrials > 0
+        ? "Trials started this range without a paid conversion yet"
+        : "No trials started in this range";
+    const trialCancellationSecondary =
+      trialCancellation.totalTrials > 0
+        ? `${trialCancellation.cancelledTrials}/${trialCancellation.totalTrials} trials`
+        : undefined;
+
+    const primaryMetrics = [
       {
-        label: "Visitors",
-        value: numberFormatter.format(raw.newUsers.total),
-        secondary: "",
-        hint: "Unique devices in range",
-        delta: raw.newUsers.delta,
-        accent: "#38bdf8",
+        label: "Active sessions",
+        value: numberFormatter.format(activeSessions.total ?? 0),
+        secondary: undefined,
+        hint: activeSessionsHint,
+        delta: activeSessions.delta ?? null,
+        accent: "#22c55e",
+        live: true,
       },
       {
         label: "Revenue",
         value: currencyFormatter.format(raw.revenue.total),
-        secondary: raw.revenue.count
-          ? `${raw.revenue.count} orders`
-          : undefined,
-        hint: "Total revenue in range",
+        secondary: revenueOrdersText,
+        hint: revenueHint,
         delta: raw.revenue.delta,
         accent: "#fb7185",
       },
@@ -315,7 +432,7 @@ export default function AppAnalyticsPage() {
         label: "Conversion rate",
         value: `${percentFormatter.format(raw.conversionRate)}%`,
         secondary: undefined,
-        hint: "Purchases / visitors",
+        hint: "Paid purchases / visitors",
         delta: raw.conversionRateDelta,
         accent: "#fbbf24",
       },
@@ -323,11 +440,34 @@ export default function AppAnalyticsPage() {
         label: "Revenue / visitor",
         value: preciseCurrencyFormatter.format(raw.revenuePerUser || 0),
         secondary: undefined,
-        hint: "Average revenue per user",
+        hint: "Paid revenue per visitor",
         delta: raw.revenuePerUserDelta,
         accent: "#c084fc",
       },
     ];
+    const secondaryMetrics = [
+      {
+        label: "Avg subscription",
+        value: averageSubscriptionValue,
+        secondary:
+          averageSubscription.sampleSize > 0
+            ? `${averageSubscription.sampleSize} subscriptions`
+            : undefined,
+        hint: averageSubscriptionHint,
+        delta: averageSubscription.delta,
+        accent: "#14b8a6",
+      },
+      {
+        label: "Trial cancellation",
+        value: `${percentFormatter.format(trialCancellation.rate ?? 0)}%`,
+        secondary: trialCancellationSecondary,
+        hint: trialCancellationHint,
+        delta: trialCancellation.delta,
+        accent: "#f97316",
+      },
+    ];
+
+    return { primary: primaryMetrics, secondary: secondaryMetrics };
   }, [analytics]);
 
   const activeRangeLabel =
@@ -457,7 +597,7 @@ export default function AppAnalyticsPage() {
           ) : (
             <>
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                {metrics.map((metric) => (
+                {metrics.primary.map((metric) => (
                   <MetricCard key={metric.label} {...metric} />
                 ))}
               </div>
@@ -469,7 +609,17 @@ export default function AppAnalyticsPage() {
                     <span>Visitors</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="h-2 w-2 rounded bg-rose-400" />
+                    <span
+                      className="h-2 w-2 rounded"
+                      style={{ backgroundColor: "#fbcfe8" }}
+                    />
+                    <span>Trial revenue</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="h-2 w-2 rounded"
+                      style={{ backgroundColor: "#fb7185" }}
+                    />
                     <span>Revenue</span>
                   </div>
                 </div>
@@ -483,6 +633,26 @@ export default function AppAnalyticsPage() {
               </div>
 
               <CombinedChart data={analytics?.chart || []} />
+
+              {metrics.secondary.length ? (
+                <section className="mt-10 space-y-5">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <h2 className="text-base font-semibold text-base-content">
+                        Retention metrics
+                      </h2>
+                      <p className="text-sm text-base-content/60">
+                        Understand how trials convert and how long subscriptions stay active.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    {metrics.secondary.map((metric) => (
+                      <MetricCard key={metric.label} {...metric} />
+                    ))}
+                  </div>
+                </section>
+              ) : null}
             </>
           )}
         </div>
