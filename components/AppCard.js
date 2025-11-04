@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { toast } from "react-hot-toast";
 
 // Card component to display an app with its details
@@ -109,7 +110,13 @@ const AppCard = ({ app }) => {
           </div>
         </div>
 
-        <div className="card-actions justify-end mt-4">
+        <div className="card-actions justify-between mt-4">
+          <Link
+            href={`/dashboard/${app.app_id}`}
+            className="btn btn-sm btn-secondary"
+          >
+            View dashboard
+          </Link>
           <div className="badge badge-outline badge-lg">
             <svg
               xmlns="http://www.w3.org/2000/svg"
