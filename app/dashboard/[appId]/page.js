@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bar,
+  BarChart,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Line,
   Rectangle,
@@ -41,6 +43,16 @@ const preciseCurrencyFormatter = new Intl.NumberFormat("en-US", {
 const percentFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
+
+const PURCHASE_BAR_COLORS = [
+  "#38bdf8",
+  "#fb7185",
+  "#f97316",
+  "#14b8a6",
+  "#c084fc",
+  "#22c55e",
+  "#f59e0b",
+];
 
 const formatDateLabel = (isoDate) =>
   new Intl.DateTimeFormat("en-US", {
@@ -320,6 +332,79 @@ const CombinedChart = ({ data }) => {
   );
 };
 
+const PurchasesTooltip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null;
+  const formattedPayload = payload.map((item) => ({
+    ...item,
+    value: numberFormatter.format(item.value ?? 0),
+    name: "Purchases",
+  }));
+  return (
+    <ChartTooltipContent
+      label={label}
+      payload={formattedPayload}
+      indicator="line"
+      className="min-w-[140px]"
+    />
+  );
+};
+
+const PurchasesBarChart = ({ data }) => {
+  if (!data?.length) {
+    return (
+      <div className="flex h-64 items-center justify-center text-base-content/60">
+        No in-app purchases recorded in this range.
+      </div>
+    );
+  }
+
+  return (
+    <ChartContainer className="h-[320px] w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart
+          data={data}
+          margin={{ top: 20, right: 20, left: 10, bottom: 20 }}
+          barCategoryGap="20%"
+        >
+          <CartesianGrid
+            stroke="rgba(226,232,240,0.12)"
+            vertical={false}
+            strokeDasharray="3 3"
+          />
+          <XAxis
+            dataKey="label"
+            tickLine={false}
+            axisLine={false}
+            tickMargin={12}
+            stroke="rgba(148,163,184,0.6)"
+          />
+          <YAxis
+            allowDecimals={false}
+            axisLine={false}
+            tickLine={false}
+            tickMargin={8}
+            stroke="rgba(148,163,184,0.6)"
+          />
+          <ChartTooltip
+            cursor={{ fill: "rgba(148,163,184,0.08)" }}
+            content={<PurchasesTooltip />}
+          />
+          <Bar
+            dataKey="count"
+            name="Purchases"
+            radius={[12, 12, 0, 0]}
+            maxBarSize={64}
+          >
+            {data.map((entry) => (
+              <Cell key={entry.productId} fill={entry.color} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </ChartContainer>
+  );
+};
+
 export default function AppAnalyticsPage() {
   const params = useParams();
   const router = useRouter();
@@ -468,6 +553,15 @@ export default function AppAnalyticsPage() {
     ];
 
     return { primary: primaryMetrics, secondary: secondaryMetrics };
+  }, [analytics]);
+
+  const purchasesByProduct = useMemo(() => {
+    const items = analytics?.purchasesByProduct ?? [];
+    return items.map((item, index) => ({
+      ...item,
+      color: PURCHASE_BAR_COLORS[index % PURCHASE_BAR_COLORS.length],
+      count: item.count ?? 0,
+    }));
   }, [analytics]);
 
   const activeRangeLabel =
@@ -655,6 +749,28 @@ export default function AppAnalyticsPage() {
               ) : null}
             </>
           )}
+        </div>
+      </div>
+      <div className="mx-auto mt-8 w-full max-w-7xl px-4 md:px-8">
+        <div className="rounded-3xl border border-base-300 bg-base-200/30 p-6 shadow-lg backdrop-blur-sm">
+          <div className="mb-6 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-base-content">
+                Purchases by product
+              </h2>
+              <p className="text-sm text-base-content/60">
+                Distribution of paid purchases within the selected range.
+              </p>
+            </div>
+            <div className="rounded-full border border-base-300 bg-base-200/60 px-4 py-1 text-xs text-base-content/60">
+              {analytics?.range?.start
+                ? `${formatDateLabel(analytics.range.start)} → ${formatDateLabel(
+                    analytics.range.end
+                  )}`
+                : null}
+            </div>
+          </div>
+          <PurchasesBarChart data={purchasesByProduct} />
         </div>
       </div>
     </main>

@@ -142,6 +142,17 @@ const uniqueDeviceIds = (purchases = [], predicate = () => true) => {
   return ids;
 };
 
+const formatProductLabel = (productId) => {
+  if (!productId || typeof productId !== "string") {
+    return "Unknown";
+  }
+  return productId
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+};
+
 export async function GET(req, { params }) {
   try {
     const cookieStore = cookies();
@@ -218,7 +229,9 @@ export async function GET(req, { params }) {
     ] = await Promise.all([
       supabase
         .from("purchases")
-        .select("price, created_at, is_trial, device_id, purchase_date, expiration_date")
+        .select(
+          "price, created_at, is_trial, device_id, purchase_date, expiration_date, product_id"
+        )
         .eq("app_id", appId)
         .gte("created_at", startIso)
         .lte("created_at", endIso),
@@ -230,7 +243,9 @@ export async function GET(req, { params }) {
         .lte("created_at", endIso),
       supabase
         .from("purchases")
-        .select("price, created_at, is_trial, device_id, purchase_date, expiration_date")
+        .select(
+          "price, created_at, is_trial, device_id, purchase_date, expiration_date, product_id"
+        )
         .eq("app_id", appId)
         .gte("created_at", previousStartIso)
         .lte("created_at", previousEndIso),
@@ -388,6 +403,20 @@ export async function GET(req, { params }) {
         ? computeDelta(averageSubscriptionDays, previousAverageSubscriptionDays)
         : null;
 
+    const paidPurchases = purchases.filter((purchase) => !purchase.is_trial);
+    const productCountMap = paidPurchases.reduce((acc, purchase) => {
+      const key = purchase.product_id || "unknown";
+      acc.set(key, (acc.get(key) || 0) + 1);
+      return acc;
+    }, new Map());
+    const purchasesByProduct = Array.from(productCountMap.entries())
+      .map(([productId, count]) => ({
+        productId,
+        label: formatProductLabel(productId),
+        count,
+      }))
+      .sort((a, b) => b.count - a.count);
+
     const chart = dateBuckets.map((bucket) => ({
       date: bucket,
       revenue: Number.parseFloat(revenueByDay[bucket]?.toFixed(2) ?? 0),
@@ -475,6 +504,7 @@ export async function GET(req, { params }) {
         conversionRateDelta: computeDelta(conversionRate, previousConversionRate),
       },
       chart,
+      purchasesByProduct,
       options: {
         allowedRanges: ALLOWED_RANGES,
       },
