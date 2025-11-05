@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
 
 const ALLOWED_RANGES = [7, 14, 30, 90, 180];
+const ALLOWED_ACTIVE_WINDOWS = [7, 6, 5, 4, 3, 2, 1];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ACTIVE_SESSION_WINDOW_SECONDS = 30;
 const ACTIVE_SESSION_WINDOW_MS = ACTIVE_SESSION_WINDOW_SECONDS * 1000;
@@ -17,6 +18,14 @@ const normaliseDateToUTC = (date) => {
   const cloned = new Date(date);
   cloned.setUTCHours(0, 0, 0, 0);
   return cloned;
+};
+
+const getActiveWindowDays = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed)) return ALLOWED_ACTIVE_WINDOWS[0];
+  return ALLOWED_ACTIVE_WINDOWS.includes(parsed)
+    ? parsed
+    : ALLOWED_ACTIVE_WINDOWS[0];
 };
 
 const formatDateKey = (date) => {
@@ -176,6 +185,8 @@ export async function GET(req, { params }) {
     const url = new URL(req.url);
     const rangeFromQuery = url.searchParams.get("range");
     const rangeDays = getRangeInDays(rangeFromQuery);
+    const activeWindowFromQuery = url.searchParams.get("activeWindow");
+    const activeWindowDays = getActiveWindowDays(activeWindowFromQuery);
 
     // We extend the start date to the beginning of the day in UTC to avoid partial bars
     const now = new Date();
@@ -218,7 +229,14 @@ export async function GET(req, { params }) {
       );
     }
 
-    const activeSessionsSinceIso = new Date(now.getTime() - ACTIVE_SESSION_WINDOW_MS).toISOString();
+    const activeSessionsSinceIso = new Date(
+      now.getTime() - ACTIVE_SESSION_WINDOW_MS
+    ).toISOString();
+    const activeWindowExtendedStartDate = normaliseDateToUTC(
+      new Date(startDate.getTime() - (activeWindowDays - 1) * DAY_MS)
+    );
+    const activeWindowExtendedStartIso = activeWindowExtendedStartDate.toISOString();
+
 
     const [
       purchasesResult,
@@ -226,6 +244,8 @@ export async function GET(req, { params }) {
       previousPurchasesResult,
       previousDevicesResult,
       activeSessionsResult,
+      activeDevicesResult,
+      geoSessionsResult,
     ] = await Promise.all([
       supabase
         .from("purchases")
@@ -257,9 +277,21 @@ export async function GET(req, { params }) {
         .lte("created_at", previousEndIso),
       supabase
         .from("active_sessions")
-        .select("id", { count: "exact", head: true })
+        .select("session_started_at, last_heartbeat")
         .eq("app_id", appId)
         .gte("last_heartbeat", activeSessionsSinceIso),
+      supabase
+        .from("devices")
+        .select("device_id, last_seen_at")
+        .eq("app_id", appId)
+        .gte("last_seen_at", activeWindowExtendedStartIso)
+        .lte("last_seen_at", endIso),
+      supabase
+        .from("active_sessions")
+        .select("country_code")
+        .eq("app_id", appId)
+        .gte("session_started_at", startIso)
+        .lte("session_started_at", endIso),
     ]);
 
     const purchasesError = purchasesResult.error;
@@ -267,13 +299,17 @@ export async function GET(req, { params }) {
     const previousPurchasesError = previousPurchasesResult.error;
     const previousDevicesError = previousDevicesResult.error;
     const activeSessionsError = activeSessionsResult.error;
+    const activeDevicesError = activeDevicesResult.error;
+    const geoSessionsError = geoSessionsResult.error;
 
     if (
       purchasesError ||
       devicesError ||
       previousPurchasesError ||
       previousDevicesError ||
-      activeSessionsError
+      activeSessionsError ||
+      activeDevicesError ||
+      geoSessionsError
     ) {
       console.error("Error fetching analytics data:", {
         purchasesError,
@@ -281,6 +317,8 @@ export async function GET(req, { params }) {
         previousPurchasesError,
         previousDevicesError,
         activeSessionsError,
+        activeDevicesError,
+        geoSessionsError,
       });
       return NextResponse.json(
         { error: "Failed to fetch analytics data." },
@@ -292,7 +330,29 @@ export async function GET(req, { params }) {
     const devices = devicesResult.data ?? [];
     const previousPurchases = previousPurchasesResult.data ?? [];
     const previousDevices = previousDevicesResult.data ?? [];
-    const activeSessionsCount = activeSessionsResult.count ?? 0;
+    const activeSessionsData = activeSessionsResult.data ?? [];
+    const activeSessionsCount = activeSessionsData.length;
+    const activeDevices = activeDevicesResult.data ?? [];
+    const geoSessions = geoSessionsResult.data ?? [];
+
+    const sessionDurations = activeSessionsData
+      .map((session) => {
+        if (!session.session_started_at || !session.last_heartbeat) return null;
+        const start = new Date(session.session_started_at);
+        const end = new Date(session.last_heartbeat);
+        if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()))
+          return null;
+        if (end <= start) return null;
+        return end.getTime() - start.getTime();
+      })
+      .filter((duration) => Number.isFinite(duration) && duration > 0);
+    const averageSessionDurationSeconds = sessionDurations.length
+      ? Number.parseFloat(
+          (sessionDurations.reduce((sum, ms) => sum + ms, 0) /
+            sessionDurations.length /
+            1000).toFixed(2)
+        )
+      : null;
 
     const trialDeviceIdsCurrent = Array.from(
       uniqueDeviceIds(
@@ -417,6 +477,40 @@ export async function GET(req, { params }) {
       }))
       .sort((a, b) => b.count - a.count);
 
+    const countryCountMap = geoSessions.reduce((acc, session) => {
+      const codeRaw = session?.country_code;
+      const code = codeRaw
+        ? String(codeRaw).trim().toUpperCase()
+        : "UNKNOWN";
+      if (!code) return acc;
+      acc.set(code, (acc.get(code) || 0) + 1);
+      return acc;
+    }, new Map());
+    const totalCountrySessions = Array.from(countryCountMap.values()).reduce(
+      (sum, count) => sum + count,
+      0
+    );
+    const geoCountries = Array.from(countryCountMap.entries())
+      .map(([code, count]) => ({
+        code,
+        count,
+        percent:
+          totalCountrySessions > 0
+            ? Number.parseFloat(((count / totalCountrySessions) * 100).toFixed(2))
+            : 0,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8);
+
+    const activeDeviceSnapshots = activeDevices
+      .map((device) => {
+        if (!device.device_id || !device.last_seen_at) return null;
+        const lastSeen = new Date(device.last_seen_at);
+        if (!Number.isFinite(lastSeen.getTime())) return null;
+        return { deviceId: device.device_id, lastSeenMs: lastSeen.getTime() };
+      })
+      .filter(Boolean);
+
     const chart = dateBuckets.map((bucket) => ({
       date: bucket,
       revenue: Number.parseFloat(revenueByDay[bucket]?.toFixed(2) ?? 0),
@@ -425,6 +519,29 @@ export async function GET(req, { params }) {
       ),
       newUsers: usersByDay[bucket] ?? 0,
     }));
+
+    const activeUsersSeries = dateBuckets.map((bucket) => {
+      const bucketDate = new Date(`${bucket}T00:00:00.000Z`);
+      const bucketStartMs = bucketDate.getTime();
+      const bucketEndMs = bucketStartMs + DAY_MS - 1;
+      const windowStartMs =
+        bucketStartMs - (activeWindowDays > 0 ? (activeWindowDays - 1) * DAY_MS : 0);
+      const activeIds = new Set();
+
+      activeDeviceSnapshots.forEach((snapshot) => {
+        if (
+          snapshot.lastSeenMs >= windowStartMs &&
+          snapshot.lastSeenMs <= bucketEndMs
+        ) {
+          activeIds.add(snapshot.deviceId);
+        }
+      });
+
+      return {
+        date: bucket,
+        activeUsers: activeIds.size,
+      };
+    });
 
     const revenuePerUser =
       newUsersCount > 0 ? Number.parseFloat((totalRevenue / newUsersCount).toFixed(2)) : 0;
@@ -496,6 +613,10 @@ export async function GET(req, { params }) {
           previous: previousNewUsers,
           delta: computeDelta(newUsersCount, previousNewUsers),
         },
+        session: {
+          averageDurationSeconds: averageSessionDurationSeconds,
+          sampleSize: sessionDurations.length,
+        },
         revenuePerUser,
         revenuePerUserPrevious: previousRevenuePerUser,
         revenuePerUserDelta: computeDelta(revenuePerUser, previousRevenuePerUser),
@@ -504,9 +625,18 @@ export async function GET(req, { params }) {
         conversionRateDelta: computeDelta(conversionRate, previousConversionRate),
       },
       chart,
+      activeUsers: {
+        windowDays: activeWindowDays,
+        series: activeUsersSeries,
+      },
       purchasesByProduct,
+      geography: {
+        totalSessions: totalCountrySessions,
+        countries: geoCountries,
+      },
       options: {
         allowedRanges: ALLOWED_RANGES,
+        activeWindows: ALLOWED_ACTIVE_WINDOWS,
       },
     });
   } catch (error) {

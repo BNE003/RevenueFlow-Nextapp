@@ -8,6 +8,7 @@ import {
   Cell,
   ComposedChart,
   Line,
+  LineChart,
   Rectangle,
   ResponsiveContainer,
   XAxis,
@@ -27,6 +28,7 @@ const DEFAULT_RANGE_LABELS = {
   90: "Last 90 days",
   180: "Last 180 days",
 };
+const DEFAULT_ACTIVE_WINDOWS = [7, 6, 5, 4, 3, 2, 1];
 
 const numberFormatter = new Intl.NumberFormat("en-US");
 const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -54,6 +56,17 @@ const PURCHASE_BAR_COLORS = [
   "#f59e0b",
 ];
 
+const COUNTRY_BAR_COLORS = [
+  "#6366f1",
+  "#0ea5e9",
+  "#22c55e",
+  "#f97316",
+  "#f43f5e",
+  "#a855f7",
+  "#14b8a6",
+  "#facc15",
+];
+
 const formatDateLabel = (isoDate) =>
   new Intl.DateTimeFormat("en-US", {
     day: "2-digit",
@@ -78,6 +91,22 @@ const formatDurationFromDays = (days) => {
   }
   const seconds = minutes * 60;
   const roundedSeconds = Math.max(1, Math.round(seconds));
+  return `${roundedSeconds} sec`;
+};
+
+const formatDurationFromSeconds = (seconds) => {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  if (seconds >= 3600) {
+    const hours = seconds / 3600;
+    const rounded = Number.parseFloat(hours.toFixed(1));
+    return `${rounded} hr${Math.abs(rounded - 1) < 0.01 ? "" : "s"}`;
+  }
+  if (seconds >= 60) {
+    const minutes = seconds / 60;
+    const rounded = Number.parseFloat(minutes.toFixed(1));
+    return `${rounded} min`;
+  }
+  const roundedSeconds = Number.parseFloat(seconds.toFixed(1));
   return `${roundedSeconds} sec`;
 };
 
@@ -124,6 +153,37 @@ const RangeSelector = ({ value, options, onChange }) => {
           </button>
         );
       })}
+    </div>
+  );
+};
+
+const RangeDropdown = ({ value, options, onChange }) => {
+  if (!options?.length) return null;
+
+  return (
+    <div className="relative">
+      <select
+        className="peer block w-full appearance-none rounded-full border border-base-300/80 bg-base-100/80 px-4 pr-10 py-1.5 text-sm font-medium text-base-content backdrop-blur transition focus:border-base-300 focus:outline-none focus:shadow-none focus-visible:shadow-none focus:ring-0 focus-visible:ring-0 focus:ring-offset-0"
+        value={String(value)}
+        onChange={(event) => onChange(Number(event.target.value))}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-base-content/60 transition peer-focus:text-primary">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path
+            d="M4 6l4 4 4-4"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </span>
     </div>
   );
 };
@@ -222,19 +282,19 @@ const CombinedChart = ({ data }) => {
   const CustomTooltip = ({ label, payload, active }) => {
     if (!active || !payload?.length) return null;
     const displayLabel = label ?? "";
-    const entries = payload.map((entry) => ({
-      ...entry,
-      value:
-        entry.dataKey === "paidRevenue" || entry.dataKey === "trialRevenue"
-          ? preciseCurrencyFormatter.format(entry.value || 0)
-          : numberFormatter.format(entry.value || 0),
-      name:
-        entry.dataKey === "paidRevenue"
-          ? "Revenue"
-          : entry.dataKey === "trialRevenue"
-          ? "Trial revenue"
-          : "Visitors",
-    }));
+      const entries = payload.map((entry) => ({
+        ...entry,
+        value:
+          entry.dataKey === "paidRevenue" || entry.dataKey === "trialRevenue"
+            ? preciseCurrencyFormatter.format(entry.value || 0)
+            : numberFormatter.format(entry.value || 0),
+        name:
+          entry.dataKey === "paidRevenue"
+            ? "Revenue"
+            : entry.dataKey === "trialRevenue"
+            ? "Trial revenue"
+            : "New users",
+      }));
 
     return (
       <ChartTooltipContent
@@ -324,7 +384,7 @@ const CombinedChart = ({ data }) => {
             strokeWidth={3}
             dot={{ r: 4, strokeWidth: 2, stroke: "#0f172a", fill: "var(--chart-users)" }}
             activeDot={{ r: 6 }}
-            name="Visitors"
+            name="New users"
           />
         </ComposedChart>
       </ResponsiveContainer>
@@ -405,15 +465,193 @@ const PurchasesBarChart = ({ data }) => {
   );
 };
 
+const UsersByCountryTooltip = ({ active, payload }) => {
+  if (!active || !payload?.length) return null;
+  const [entry] = payload;
+  const context = entry?.payload;
+  const data = payload.map((item) => ({
+    ...item,
+    name: "Users",
+    value: numberFormatter.format(item.value ?? 0),
+  }));
+
+  return (
+    <ChartTooltipContent
+      label={
+        context?.label
+          ? `${context.label} • ${percentFormatter.format(context.percent ?? 0)}%`
+          : "Users"
+      }
+      payload={data}
+      indicator="line"
+    />
+  );
+};
+
+const UsersByCountryChart = ({ data }) => {
+  if (!data?.length) {
+    return (
+      <div className="flex h-64 items-center justify-center text-base-content/60">
+        No session location data for this range.
+      </div>
+    );
+  }
+
+  return (
+    <ChartContainer className="h-[360px] w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart
+          data={data}
+          layout="vertical"
+          margin={{ top: 20, right: 24, left: 8, bottom: 20 }}
+          barCategoryGap="20%"
+        >
+          <CartesianGrid
+            stroke="rgba(226,232,240,0.12)"
+            horizontal={false}
+            strokeDasharray="3 3"
+          />
+          <XAxis
+            type="number"
+            tickLine={false}
+            axisLine={false}
+            tickMargin={12}
+            stroke="rgba(148,163,184,0.6)"
+            tickFormatter={(value) => numberFormatter.format(value)}
+          />
+          <YAxis
+            dataKey="label"
+            type="category"
+            axisLine={false}
+            tickLine={false}
+            width={140}
+            tick={{ fill: "rgba(148,163,184,0.9)" }}
+          />
+          <ChartTooltip
+            cursor={{ fill: "rgba(148,163,184,0.08)" }}
+            content={<UsersByCountryTooltip />}
+          />
+          <Bar dataKey="count" radius={[0, 12, 12, 0]} minPointSize={2}>
+            {data.map((entry) => (
+              <Cell key={entry.code || entry.label} fill={entry.color} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </ChartContainer>
+  );
+};
+
+const ActiveUsersTooltip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null;
+  const formattedPayload = payload.map((item) => ({
+    ...item,
+    value: numberFormatter.format(item.value ?? 0),
+    name: "Active users",
+  }));
+  return (
+    <ChartTooltipContent
+      label={label}
+      payload={formattedPayload}
+      indicator="dot"
+    />
+  );
+};
+
+const ActiveUsersChart = ({ data }) => {
+  const chartData = useMemo(() => {
+    if (!data?.length) return [];
+    return data.map((item) => ({
+      ...item,
+      label: formatDateLabel(item.date),
+      activeUsers: item.activeUsers ?? 0,
+    }));
+  }, [data]);
+
+  if (!chartData.length) {
+    return (
+      <div className="flex h-64 items-center justify-center text-base-content/60">
+        No active user data for this range.
+      </div>
+    );
+  }
+
+  return (
+    <ChartContainer
+      className="h-[320px] w-full"
+      config={{
+        active: "#38bdf8",
+      }}
+    >
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart
+          data={chartData}
+          margin={{ top: 20, right: 20, left: 10, bottom: 20 }}
+        >
+          <CartesianGrid
+            stroke="rgba(226,232,240,0.12)"
+            vertical={false}
+            strokeDasharray="3 3"
+          />
+          <XAxis
+            dataKey="label"
+            tickLine={false}
+            axisLine={false}
+            tickMargin={12}
+            stroke="rgba(148,163,184,0.6)"
+          />
+          <YAxis
+            allowDecimals={false}
+            axisLine={false}
+            tickLine={false}
+            tickMargin={8}
+            stroke="rgba(148,163,184,0.6)"
+          />
+          <ChartTooltip
+            cursor={{ stroke: "rgba(148,163,184,0.2)" }}
+            content={<ActiveUsersTooltip />}
+          />
+          <Line
+            type="monotone"
+            dataKey="activeUsers"
+            stroke="var(--chart-active)"
+            strokeWidth={3}
+            dot={{
+              r: 3,
+              strokeWidth: 2,
+              stroke: "#0f172a",
+              fill: "var(--chart-active)",
+            }}
+            activeDot={{ r: 6 }}
+            name="Active users"
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </ChartContainer>
+  );
+};
+
 export default function AppAnalyticsPage() {
   const params = useParams();
   const router = useRouter();
   const appId = params?.appId;
 
   const [range, setRange] = useState(7);
+  const [activeWindow, setActiveWindow] = useState(7);
   const [analytics, setAnalytics] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  const regionDisplayNames = useMemo(() => {
+    if (typeof Intl === "undefined" || typeof Intl.DisplayNames !== "function") {
+      return null;
+    }
+    try {
+      return new Intl.DisplayNames(["en"], { type: "region" });
+    } catch {
+      return null;
+    }
+  }, []);
 
   const fetchAnalytics = useCallback(async () => {
     if (!appId) return;
@@ -422,7 +660,9 @@ export default function AppAnalyticsPage() {
 
     try {
       const response = await fetch(
-        `/api/apps/${encodeURIComponent(appId)}/analytics?range=${range}`
+        `/api/apps/${encodeURIComponent(
+          appId
+        )}/analytics?range=${range}&activeWindow=${activeWindow}`
       );
       if (!response.ok) {
         const problem = await response.json().catch(() => ({}));
@@ -435,7 +675,7 @@ export default function AppAnalyticsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [appId, range]);
+  }, [appId, range, activeWindow]);
 
   useEffect(() => {
     fetchAnalytics();
@@ -449,9 +689,31 @@ export default function AppAnalyticsPage() {
     }));
   }, [analytics]);
 
+  const activeWindowOptions = useMemo(() => {
+    const allowed =
+      analytics?.options?.activeWindows || DEFAULT_ACTIVE_WINDOWS;
+    return allowed.map((value) => ({
+      value,
+      label: `${value} day${value === 1 ? "" : "s"}`,
+    }));
+  }, [analytics]);
+
+  useEffect(() => {
+    const allowed = analytics?.options?.activeWindows;
+    if (!allowed?.length) return;
+    if (!allowed.includes(activeWindow)) {
+      setActiveWindow(allowed[0]);
+    }
+  }, [analytics, activeWindow]);
+
   const handleRangeChange = (nextRange) => {
     if (nextRange === range) return;
     setRange(nextRange);
+  };
+
+  const handleActiveWindowChange = (nextWindow) => {
+    if (nextWindow === activeWindow) return;
+    setActiveWindow(nextWindow);
   };
 
   const metrics = useMemo(() => {
@@ -563,6 +825,70 @@ export default function AppAnalyticsPage() {
       count: item.count ?? 0,
     }));
   }, [analytics]);
+
+  const usersByCountry = useMemo(() => {
+    const countries = analytics?.geography?.countries ?? [];
+    if (!countries.length) return [];
+
+    return countries.map((item, index) => {
+      const code = item.code || "UNKNOWN";
+      const normalizedCode = code.toUpperCase();
+      const resolvedName =
+        (regionDisplayNames && typeof regionDisplayNames.of === "function"
+          ? regionDisplayNames.of(normalizedCode)
+          : null) || null;
+      const label =
+        resolvedName ||
+        (normalizedCode === "UNKNOWN" || normalizedCode === "UNK"
+          ? "Unknown"
+          : normalizedCode);
+
+      return {
+        ...item,
+        code: normalizedCode,
+        label,
+        count: item.count ?? 0,
+        percent: Number.isFinite(item.percent) ? item.percent : 0,
+        color: COUNTRY_BAR_COLORS[index % COUNTRY_BAR_COLORS.length],
+      };
+    });
+  }, [analytics, regionDisplayNames]);
+
+  const totalCountrySessions = analytics?.geography?.totalSessions ?? 0;
+
+  const activeUserCards = useMemo(() => {
+    if (!analytics) return [];
+    const newUsers = analytics.metrics?.newUsers ?? {};
+    const session = analytics.metrics?.session ?? {};
+    const averageSessionValue = formatDurationFromSeconds(
+      session.averageDurationSeconds
+    );
+
+    return [
+      {
+        label: "New users",
+        value: numberFormatter.format(newUsers.total ?? 0),
+        secondary: undefined,
+        hint: "Unique devices created in this range",
+        delta: newUsers.delta,
+        accent: "#38bdf8",
+      },
+      {
+        label: "Avg session time",
+        value: averageSessionValue,
+        secondary:
+          session.sampleSize > 0
+            ? `${session.sampleSize} session${session.sampleSize === 1 ? "" : "s"}`
+            : undefined,
+        hint: "Across active sessions (≤30 sec heartbeat window)",
+        delta: null,
+        accent: "#f97316",
+      },
+    ];
+  }, [analytics]);
+
+  const activeUsersWindowDays = analytics?.activeUsers?.windowDays ?? activeWindow;
+  const activeUsersWindowSuffix = activeUsersWindowDays === 1 ? "" : "s";
 
   const activeRangeLabel =
     rangeOptions.find((option) => option.value === range)?.label ||
@@ -700,7 +1026,7 @@ export default function AppAnalyticsPage() {
                 <div className="flex items-center gap-4 text-sm text-base-content/70">
                   <div className="flex items-center gap-2">
                     <span className="h-2 w-2 rounded-full bg-sky-400" />
-                    <span>Visitors</span>
+                    <span>New users</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span
@@ -751,28 +1077,84 @@ export default function AppAnalyticsPage() {
           )}
         </div>
       </div>
-      <div className="mx-auto mt-8 w-full max-w-7xl px-4 md:px-8">
-        <div className="rounded-3xl border border-base-300 bg-base-200/30 p-6 shadow-lg backdrop-blur-sm">
-          <div className="mb-6 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-base-content">
-                Purchases by product
-              </h2>
-              <p className="text-sm text-base-content/60">
-                Distribution of paid purchases within the selected range.
-              </p>
+      {!isLoading && !error ? (
+        <div className="mx-auto mt-8 w-full max-w-7xl px-4 md:px-8">
+          <div className="rounded-3xl border border-base-300 bg-base-200/30 p-6 shadow-lg backdrop-blur-sm">
+            <div className="mb-6 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-base-content">
+                  Purchases by product
+                </h2>
+                <p className="text-sm text-base-content/60">
+                  Distribution of paid purchases within the selected range.
+                </p>
+              </div>
+              <div className="rounded-full border border-base-300 bg-base-200/60 px-4 py-1 text-xs text-base-content/60">
+                {analytics?.range?.start
+                  ? `${formatDateLabel(analytics.range.start)} → ${formatDateLabel(
+                      analytics.range.end
+                    )}`
+                  : null}
+              </div>
             </div>
-            <div className="rounded-full border border-base-300 bg-base-200/60 px-4 py-1 text-xs text-base-content/60">
-              {analytics?.range?.start
-                ? `${formatDateLabel(analytics.range.start)} → ${formatDateLabel(
-                    analytics.range.end
-                  )}`
-                : null}
-            </div>
+            <PurchasesBarChart data={purchasesByProduct} />
           </div>
-          <PurchasesBarChart data={purchasesByProduct} />
         </div>
-      </div>
+      ) : null}
+      {!isLoading && !error ? (
+        <div className="mx-auto mt-8 w-full max-w-7xl px-4 md:px-8">
+          <div className="rounded-3xl border border-base-300 bg-base-200/30 p-6 shadow-lg backdrop-blur-sm">
+            <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-base-content">Users</h2>
+                <p className="text-sm text-base-content/60">
+                  Unique devices with activity in the last {activeUsersWindowDays} day
+                  {activeUsersWindowSuffix}. Adjust the window to explore engagement.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <RangeDropdown
+                  value={activeWindow}
+                  options={activeWindowOptions}
+                  onChange={handleActiveWindowChange}
+                />
+                <div className="rounded-full border border-base-300 bg-base-200/60 px-4 py-1 text-xs text-base-content/60">
+                  Active if seen in last {activeUsersWindowDays} day
+                  {activeUsersWindowSuffix}
+                </div>
+              </div>
+            </div>
+            <ActiveUsersChart data={analytics?.activeUsers?.series || []} />
+            {usersByCountry.length ? (
+              <div className="mt-10">
+                <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="text-base font-semibold text-base-content">
+                      Where users come from
+                    </h3>
+                    <p className="text-sm text-base-content/60">
+                      Sessions grouped by top countries during this range.
+                    </p>
+                  </div>
+                  <div className="rounded-full border border-base-300 bg-base-200/60 px-4 py-1 text-xs text-base-content/60">
+                    {`${numberFormatter.format(totalCountrySessions)} session${
+                      totalCountrySessions === 1 ? "" : "s"
+                    }`}
+                  </div>
+                </div>
+                <UsersByCountryChart data={usersByCountry} />
+              </div>
+            ) : null}
+            {activeUserCards.length ? (
+              <div className="mt-6 grid gap-4 md:grid-cols-2">
+                {activeUserCards.map((metric) => (
+                  <MetricCard key={metric.label} {...metric} />
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
